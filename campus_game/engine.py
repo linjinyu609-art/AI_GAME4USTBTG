@@ -18,6 +18,15 @@ RARITY_RATE = {"SSR": 0.05, "SR": 0.25, "R": 0.70}
 RARITY_BASE = {"SSR": 52, "SR": 34, "R": 22}
 RARITY_GROWTH = {"SSR": 6, "SR": 5, "R": 4}
 
+RELIC_POOL = [
+    {"id": "RLC001", "name": "炎纹芯片", "role": "强袭", "value": 0.12},
+    {"id": "RLC002", "name": "潮汐芯片", "role": "术师", "value": 0.11},
+    {"id": "RLC003", "name": "雷相芯片", "role": "狙击", "value": 0.13},
+    {"id": "RLC004", "name": "岚盾芯片", "role": "守卫", "value": 0.12},
+    {"id": "RLC005", "name": "光导芯片", "role": "支援", "value": 0.10},
+    {"id": "RLC006", "name": "影袭芯片", "role": "先锋", "value": 0.11},
+]
+
 
 @dataclass
 class Hero:
@@ -48,12 +57,16 @@ class PlayerState:
     account_level: int = 1
     account_exp: int = 0
     pity_count: int = 0
+    trial_tickets: int = 3
+    relic_shards: int = 0
     heroes: List[Dict] = field(default_factory=list)
     team_ids: List[str] = field(default_factory=list)
+    hero_relics: Dict[str, Dict] = field(default_factory=dict)
     daily: Dict = field(default_factory=lambda: {
         "pull": 0,
         "battle": 0,
         "event": 0,
+        "trial": 0,
         "claim": False,
     })
     quests: Dict[str, Dict] = field(default_factory=dict)
@@ -66,7 +79,6 @@ class GameEngine:
         self._bootstrap_new_account()
         self._ensure_quests()
 
-    # -------------------------- 生命周期 --------------------------
     def _bootstrap_new_account(self):
         starter_ids = ["C0001", "C0002", "C0003"]
         for sid in starter_ids:
@@ -107,7 +119,6 @@ class GameEngine:
         self._ensure_quests()
         print("存档加载成功。")
 
-    # -------------------------- 数据与计算 --------------------------
     def _ensure_quests(self):
         for q in CHAPTER_BLUEPRINTS:
             qid = q["quest_id"]
@@ -118,6 +129,25 @@ class GameEngine:
         if len(team) < 3:
             team = sorted(self.hero_dict.values(), key=lambda x: x.power, reverse=True)[:3]
         return team
+
+    def _relic_bonus(self, hero: Hero) -> float:
+        record = self.state.hero_relics.get(hero.hero_id)
+        if not record:
+            return 0.0
+        bonus = record["value"]
+        if record["role"] == hero.role:
+            bonus += 0.04
+        return bonus
+
+    def _team_synergy_bonus(self, team: List[Hero]) -> float:
+        roles = {h.role for h in team}
+        elements = {h.element for h in team}
+        bonus = 0.0
+        if len(roles) == 3:
+            bonus += 0.06
+        if len(elements) == 3:
+            bonus += 0.06
+        return bonus
 
     def _skill_multiplier(self, hero: Hero, enemy: Dict) -> float:
         skill = SKILL_POOL[hero.skill_key]
@@ -161,48 +191,68 @@ class GameEngine:
             "chapter_tag": chapter_def["chapter_title"],
         }
 
+    def _trial_enemy(self, floor: int) -> Dict:
+        template = random.choice(ENEMY_POOL)
+        rank = "Boss" if floor % 3 == 0 else "Elite" if floor % 2 == 0 else "Normal"
+        mult = 1.48 if rank == "Boss" else 1.22 if rank == "Elite" else 1.0
+        level = self.state.chapter * 8 + floor * 4
+        power = int((template["base_power"] + level * 4 + self.state.account_level * 6) * mult)
+        return {
+            "name": template["name"],
+            "element": template["element"],
+            "rank": rank,
+            "level": level,
+            "power": power,
+            "chapter_tag": "深渊试炼",
+        }
+
     def _team_power_detail(self, enemy: Dict):
         team = self._get_team()
+        synergy = self._team_synergy_bonus(team)
         total = 0
         detail = []
         for h in team:
             mult = self._skill_multiplier(h, enemy)
-            value = int(h.power * mult)
+            relic = self._relic_bonus(h)
+            value = int(h.power * mult * (1 + relic))
             total += value
-            detail.append((h, mult, value))
-        return total, detail
+            detail.append((h, mult, relic, value))
+        total = int(total * (1 + synergy))
+        return total, detail, synergy
 
     def _grant_account_exp(self, value: int):
         self.state.account_exp += value
         while self.state.account_exp >= self._account_level_cap(self.state.account_level):
             self.state.account_exp -= self._account_level_cap(self.state.account_level)
             self.state.account_level += 1
-            self.state.stamina = min(30 + self.state.account_level, self.state.stamina + 3)
+            self.state.stamina = min(35 + self.state.account_level, self.state.stamina + 3)
+            self.state.trial_tickets = min(5, self.state.trial_tickets + 1)
             self.state.gems += 80
-            print(f"账号升级到 Lv.{self.state.account_level}，奖励 80 钻石，体力+3")
+            print(f"账号升级到 Lv.{self.state.account_level}，奖励 80 钻石，体力+3，试炼票+1")
 
     @staticmethod
     def _account_level_cap(level: int) -> int:
         return 100 + level * 22
 
-    # -------------------------- 核心功能 --------------------------
     def show_dashboard(self):
         team_power = sum(h.power for h in self._get_team())
-        print("\n=== 校园异能扭蛋 - 可玩版 ===")
+        print("\n=== 校园异能扭蛋 - Playable++ ===")
         print(
             f"玩家:{self.state.name} Lv.{self.state.account_level}({self.state.account_exp}/{self._account_level_cap(self.state.account_level)})"
             f" 章节:{self.state.chapter}-{self.state.stage}"
         )
-        print(f"钻石:{self.state.gems} 金币:{self.state.coins} 体力:{self.state.stamina} 队伍基础战力:{team_power}")
+        print(
+            f"钻石:{self.state.gems} 金币:{self.state.coins} 体力:{self.state.stamina} 试炼票:{self.state.trial_tickets} "
+            f"芯片碎片:{self.state.relic_shards} 队伍基础战力:{team_power}"
+        )
         d = self.state.daily
-        print(f"每日任务: 抽卡{d['pull']}/5 推图{d['battle']}/4 事件{d['event']}/2 已领奖:{d['claim']}")
+        print(f"每日任务: 抽卡{d['pull']}/5 推图{d['battle']}/4 事件{d['event']}/2 试炼{d['trial']}/1 已领奖:{d['claim']}")
 
     def pull_once(self):
-        cost = 120
-        if self.state.gems < cost:
+        if self.state.gems < 120:
             print("钻石不足")
             return
-        self.state.gems -= cost
+        self.state.gems -= 120
         self.state.pity_count += 1
         hero = self._draw_hero()
         self._obtain_hero(hero)
@@ -210,11 +260,10 @@ class GameEngine:
         print(f"单抽获得: {hero.rarity} {hero.name}[{hero.element}/{hero.role}] 技能:{SKILL_POOL[hero.skill_key]['name']}")
 
     def pull_ten(self):
-        cost = 1080
-        if self.state.gems < cost:
+        if self.state.gems < 1080:
             print("钻石不足")
             return
-        self.state.gems -= cost
+        self.state.gems -= 1080
         print("\n=== 十连结果 ===")
         got_sr_plus = False
         for idx in range(10):
@@ -242,7 +291,6 @@ class GameEngine:
                     rarity = "SR"
                 else:
                     rarity = "R"
-
         pool = [c for c in CARD_POOL if c["rarity"] == rarity]
         card = random.choice(pool)
         return Hero(
@@ -258,6 +306,7 @@ class GameEngine:
         if incoming.hero_id in self.hero_dict:
             hero = self.hero_dict[incoming.hero_id]
             hero.exp += 20
+            self.state.relic_shards += 4
             if hero.exp >= 100:
                 hero.exp -= 100
                 hero.star = min(6, hero.star + 1)
@@ -270,9 +319,11 @@ class GameEngine:
         heroes = sorted(self.hero_dict.values(), key=lambda x: (x.rarity, x.power), reverse=True)
         for i, h in enumerate(heroes, start=1):
             sk = SKILL_POOL[h.skill_key]
+            relic = self.state.hero_relics.get(h.hero_id)
+            relic_txt = f" 芯片:{relic['name']}+{int(relic['value']*100)}%" if relic else ""
             print(
                 f"{i:03d}. {h.hero_id} {h.rarity} {h.name}[{h.element}/{h.role}] Lv.{h.level} {h.star}★ 战力{h.power} "
-                f"技能:{sk['name']}({sk['desc']})"
+                f"技能:{sk['name']}({sk['desc']}){relic_txt}"
             )
 
     def team_setup(self):
@@ -301,6 +352,44 @@ class GameEngine:
         self._grant_account_exp(20)
         print(f"{hero.name} 升级到 Lv.{hero.level}, 战力 {hero.power}")
 
+    def relic_workshop(self):
+        print("\n=== 芯片工坊 ===")
+        print(f"当前碎片: {self.state.relic_shards} | 合成1个芯片需要 20碎片 + 800金币")
+        print("1) 合成芯片  2) 装配芯片  3) 卸下芯片  0) 返回")
+        choice = input("选择: ").strip()
+        if choice == "1":
+            if self.state.relic_shards < 20 or self.state.coins < 800:
+                print("材料不足")
+                return
+            self.state.relic_shards -= 20
+            self.state.coins -= 800
+            relic = random.choice(RELIC_POOL)
+            print(f"合成成功：{relic['name']}（适配{relic['role']}，+{int(relic['value']*100)}%）")
+            target = input("输入要装配的hero_id(回车跳过): ").strip()
+            if target and target in self.hero_dict:
+                self.state.hero_relics[target] = relic
+                print("装配成功")
+        elif choice == "2":
+            target = input("输入hero_id: ").strip()
+            if target not in self.hero_dict:
+                print("角色不存在")
+                return
+            for i, r in enumerate(RELIC_POOL, 1):
+                print(f"{i}. {r['name']} 适配{r['role']} +{int(r['value']*100)}%")
+            pick = input("输入编号装配(仅测试环境，不消耗): ").strip()
+            if not pick.isdigit() or not (1 <= int(pick) <= len(RELIC_POOL)):
+                print("输入无效")
+                return
+            self.state.hero_relics[target] = RELIC_POOL[int(pick) - 1]
+            print("装配完成")
+        elif choice == "3":
+            target = input("输入hero_id: ").strip()
+            if target in self.state.hero_relics:
+                self.state.hero_relics.pop(target)
+                print("已卸下")
+            else:
+                print("该角色无芯片")
+
     def battle(self):
         if self.state.stamina <= 0:
             print("体力不足")
@@ -308,13 +397,15 @@ class GameEngine:
         self.state.stamina -= 1
 
         enemy = self._enemy_for_stage()
-        team_power, detail = self._team_power_detail(enemy)
+        team_power, detail, synergy = self._team_power_detail(enemy)
 
         print(f"\n敌人: {enemy['name']} [{enemy['element']}] {enemy['rank']} Lv.{enemy['level']} 战力{enemy['power']} ({enemy['chapter_tag']})")
-        for h, m, v in detail:
-            print(f"  - {h.name} {h.element}/{h.role} 基础{h.power} 技能倍率x{m:.2f} => {v}")
+        for h, m, relic, v in detail:
+            print(f"  - {h.name} {h.element}/{h.role} 基础{h.power} 技能x{m:.2f} 芯片+{int(relic*100)}% => {v}")
+        if synergy > 0:
+            print(f"队伍协同加成 +{int(synergy*100)}%")
 
-        win_rate = max(0.08, min(0.95, 0.48 + (team_power - enemy["power"]) / 360))
+        win_rate = max(0.08, min(0.95, 0.48 + (team_power - enemy['power']) / 360))
         print(f"总战力:{team_power}, 预计胜率:{int(win_rate * 100)}%")
 
         if random.random() < win_rate:
@@ -322,30 +413,63 @@ class GameEngine:
             bonus = 180 if enemy["rank"] == "Elite" else 320 if enemy["rank"] == "Boss" else 0
             coin = base_coin + bonus
             gem = 12 if enemy["rank"] == "Normal" else 24 if enemy["rank"] == "Elite" else 45
+            shard = 6 if enemy["rank"] == "Normal" else 12 if enemy["rank"] == "Elite" else 20
             self.state.coins += coin
             self.state.gems += gem
+            self.state.relic_shards += shard
             self.state.daily["battle"] += 1
             self._grant_account_exp(28)
             self._advance_stage()
             self._quest_progress(1)
-            print(f"战斗胜利 +{coin}金币 +{gem}钻石")
+            print(f"战斗胜利 +{coin}金币 +{gem}钻石 +{shard}芯片碎片")
         else:
-            reason = self._battle_failure_advice(enemy, detail)
+            reason = self._battle_failure_advice(enemy)
             print("战斗失败。建议：")
             for line in reason:
                 print(f"  * {line}")
 
-    def _battle_failure_advice(self, enemy: Dict, detail: List):
+    def _battle_failure_advice(self, enemy: Dict):
         advice = []
         team = self._get_team()
-        missing = [h for h in team if SKILL_POOL[h.skill_key]["target_element"] == enemy["element"]]
-        if not missing:
+        counters = [h for h in team if SKILL_POOL[h.skill_key]["target_element"] == enemy["element"]]
+        if not counters:
             advice.append(f"当前缺少克制 {enemy['element']} 的技能角色，建议调整编队。")
         low = [h for h in team if h.level < self.state.chapter + 1]
         if low:
             advice.append("队伍平均等级偏低，建议至少提升主力到当前章节+1。")
-        advice.append("可先刷校园事件与任务补资源，再回头推进主线。")
+        if all(h.hero_id not in self.state.hero_relics for h in team):
+            advice.append("尝试在芯片工坊装配芯片，可显著提升战力。")
+        advice.append("可先刷校园事件与试炼补资源，再回头推进主线。")
         return advice
+
+    def abyss_trial(self):
+        if self.state.trial_tickets <= 0:
+            print("试炼票不足")
+            return
+        self.state.trial_tickets -= 1
+        print("\n=== 深渊试炼开始（3层）===")
+        total_score = 0
+        for floor in range(1, 4):
+            enemy = self._trial_enemy(floor)
+            team_power, detail, synergy = self._team_power_detail(enemy)
+            floor_rate = max(0.06, min(0.92, 0.45 + (team_power - enemy["power"]) / 390))
+            print(f"第{floor}层: {enemy['name']} {enemy['rank']} Lv.{enemy['level']} 战力{enemy['power']} 胜率{int(floor_rate*100)}%")
+            if random.random() < floor_rate:
+                gained = int(enemy["power"] * 0.08)
+                total_score += gained
+                print(f"  胜利，获得试炼分 {gained}")
+            else:
+                print("  失败，本次试炼提前结束")
+                break
+        coin = 300 + total_score // 2
+        gem = 20 + total_score // 90
+        shard = 10 + total_score // 140
+        self.state.coins += coin
+        self.state.gems += gem
+        self.state.relic_shards += shard
+        self.state.daily["trial"] += 1
+        self._grant_account_exp(20)
+        print(f"试炼结算：+{coin}金币 +{gem}钻石 +{shard}碎片（总分{total_score}）")
 
     def _advance_stage(self):
         self.state.stage += 1
@@ -372,9 +496,10 @@ class GameEngine:
         if random.random() < option["success"]:
             self.state.coins += option["coin"]
             self.state.gems += option["gem"]
+            self.state.relic_shards += 3
             self.state.daily["event"] += 1
             self._grant_account_exp(16)
-            print(f"处理成功 +{option['coin']}金币 +{option['gem']}钻石")
+            print(f"处理成功 +{option['coin']}金币 +{option['gem']}钻石 +3碎片")
         else:
             loss = option["penalty"]
             self.state.coins = max(0, self.state.coins - loss)
@@ -382,13 +507,14 @@ class GameEngine:
 
     def daily_center(self):
         d = self.state.daily
-        print(f"抽卡{d['pull']}/5 推图{d['battle']}/4 事件{d['event']}/2 已领奖:{d['claim']}")
-        if d["pull"] >= 5 and d["battle"] >= 4 and d["event"] >= 2 and not d["claim"]:
-            yn = input("可领取 360 钻石 + 1800 金币，领取?(y/n): ").lower().strip()
+        print(f"抽卡{d['pull']}/5 推图{d['battle']}/4 事件{d['event']}/2 试炼{d['trial']}/1 已领奖:{d['claim']}")
+        if d["pull"] >= 5 and d["battle"] >= 4 and d["event"] >= 2 and d["trial"] >= 1 and not d["claim"]:
+            yn = input("可领取 420 钻石 + 2200 金币 + 35碎片，领取?(y/n): ").lower().strip()
             if yn == "y":
                 d["claim"] = True
-                self.state.gems += 360
-                self.state.coins += 1800
+                self.state.gems += 420
+                self.state.coins += 2200
+                self.state.relic_shards += 35
                 print("每日奖励领取成功")
         elif d["claim"]:
             print("今日已领取")
@@ -399,9 +525,7 @@ class GameEngine:
         print("\n=== 章节任务板 ===")
         for q in CHAPTER_BLUEPRINTS:
             state = self.state.quests[q["quest_id"]]
-            print(
-                f"{q['quest_id']} {q['title']} 进度 {state['progress']}/{q['target']} 完成:{state['done']} 已领:{state['claimed']}"
-            )
+            print(f"{q['quest_id']} {q['title']} 进度 {state['progress']}/{q['target']} 完成:{state['done']} 已领:{state['claimed']}")
         qid = input("输入任务ID领取奖励(或回车返回): ").strip()
         if not qid:
             return
@@ -419,7 +543,8 @@ class GameEngine:
         qst["claimed"] = True
         self.state.coins += qdef["reward_coin"]
         self.state.gems += qdef["reward_gem"]
-        print(f"领取成功 +{qdef['reward_coin']}金币 +{qdef['reward_gem']}钻石")
+        self.state.relic_shards += 12
+        print(f"领取成功 +{qdef['reward_coin']}金币 +{qdef['reward_gem']}钻石 +12碎片")
 
     def _quest_progress(self, amount: int):
         for q in CHAPTER_BLUEPRINTS:
@@ -439,12 +564,12 @@ class GameEngine:
         next_def = CHAPTER_BLUEPRINTS[(next_c - 1) % len(CHAPTER_BLUEPRINTS)]
         sim_curr = self._simulate_enemy_power(curr, 6)
         sim_next = self._simulate_enemy_power(next_c, 3)
-        team_power = sum(h.power for h in self._get_team())
+        team_power = sum(h.power * (1 + self._relic_bonus(h)) for h in self._get_team())
         print("\n=== 章节规划 ===")
-        print(f"当前章({curr})主题:{curr_def['chapter_title']} 主属性:{curr_def['main_element']} 推荐克制:{curr_def['counter']} ")
-        print(f"下一章({next_c})主题:{next_def['chapter_title']} 主属性:{next_def['main_element']} 推荐克制:{next_def['counter']} ")
+        print(f"当前章({curr})主题:{curr_def['chapter_title']} 主属性:{curr_def['main_element']} 推荐克制:{curr_def['counter']}")
+        print(f"下一章({next_c})主题:{next_def['chapter_title']} 主属性:{next_def['main_element']} 推荐克制:{next_def['counter']}")
         print(f"当前章中段参考敌战力:{sim_curr} | 下一章前段参考敌战力:{sim_next}")
-        print(f"你当前队伍战力:{team_power}，建议达到下一章参考值的 90% 以上再冲关。")
+        print(f"你当前队伍战力(含芯片):{int(team_power)}，建议达到下一章参考值的 90% 以上再冲关。")
 
     def _simulate_enemy_power(self, chapter: int, stage: int) -> int:
         level = chapter * 6 + stage * 3
@@ -460,21 +585,22 @@ class GameEngine:
             print("钻石不足")
             return
         self.state.gems -= 60
-        self.state.stamina = min(40, self.state.stamina + 10)
+        self.state.stamina = min(45, self.state.stamina + 10)
         print(f"体力恢复完成，当前 {self.state.stamina}")
 
     def reset_daily(self):
-        self.state.daily = {"pull": 0, "battle": 0, "event": 0, "claim": False}
+        self.state.daily = {"pull": 0, "battle": 0, "event": 0, "trial": 0, "claim": False}
+        self.state.trial_tickets = 3
         print("每日状态已重置（用于本地测试）")
 
-    # -------------------------- 运行 --------------------------
     def run(self):
         self.load()
         while True:
             self.show_dashboard()
             print(
                 "\n1单抽 2十连 3推图 4校园事件 5角色仓库 6编队 7角色升级 8每日任务"
-                "\n9章节任务板 10章节规划 11体力恢复 12保存 13重置每日(测试) 0退出"
+                "\n9章节任务板 10章节规划 11体力恢复 12保存 13重置每日(测试)"
+                "\n14芯片工坊 15深渊试炼 0退出"
             )
             choice = input("选择操作: ").strip()
             if choice == "1":
@@ -503,6 +629,10 @@ class GameEngine:
                 self.save()
             elif choice == "13":
                 self.reset_daily()
+            elif choice == "14":
+                self.relic_workshop()
+            elif choice == "15":
+                self.abyss_trial()
             elif choice == "0":
                 self.save()
                 print("感谢游玩，已自动保存。")
