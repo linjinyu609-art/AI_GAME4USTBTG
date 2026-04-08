@@ -12,6 +12,14 @@ ELEMENT_COUNTER = {
     "光": "暗",
     "暗": "光",
 }
+CHAPTER_MAIN_ELEMENT = {
+    1: "风",
+    2: "雷",
+    3: "水",
+    4: "火",
+    5: "暗",
+    6: "光",
+}
 
 NAMES = [
     "林澈", "苏遥", "白夜", "周岚", "程星", "沈烬", "顾言", "叶汐", "韩朔", "唐璃",
@@ -21,24 +29,15 @@ NAMES = [
 EVENTS = [
     {
         "title": "实验楼能量泄露",
-        "options": [
-            ("立即封锁区域", 0.75, 260, 15),
-            ("尝试吸收异能", 0.45, 420, 35),
-        ],
+        "options": [("立即封锁区域", 0.75, 260, 15), ("尝试吸收异能", 0.45, 420, 35)],
     },
     {
         "title": "社团竞赛突发袭击",
-        "options": [
-            ("稳妥掩护撤离", 0.80, 220, 15),
-            ("正面硬刚首领", 0.48, 460, 40),
-        ],
+        "options": [("稳妥掩护撤离", 0.80, 220, 15), ("正面硬刚首领", 0.48, 460, 40)],
     },
     {
         "title": "旧校舍怪谈失控",
-        "options": [
-            ("调查并净化", 0.70, 300, 20),
-            ("追踪源头核心", 0.40, 520, 45),
-        ],
+        "options": [("调查并净化", 0.70, 300, 20), ("追踪源头核心", 0.40, 520, 45)],
     },
 ]
 
@@ -53,6 +52,15 @@ class Card:
     @property
     def power(self) -> int:
         return RARITY_POWER[self.rarity] + (self.level - 1) * 4
+
+
+@dataclass
+class EnemyProfile:
+    name: str
+    element: str
+    level: int
+    rank: str
+    power: int
 
 
 @dataclass
@@ -122,6 +130,33 @@ class Game:
             bonus += 0.06
         return bonus
 
+    def _chapter_main_element(self, chapter: int) -> str:
+        # 6章后循环
+        mapped = ((chapter - 1) % len(CHAPTER_MAIN_ELEMENT)) + 1
+        return CHAPTER_MAIN_ELEMENT[mapped]
+
+    def _build_enemy(self, chapter: int, stage: int) -> EnemyProfile:
+        main_element = self._chapter_main_element(chapter)
+        alt_elements = [e for e in ELEMENTS if e != main_element]
+        enemy_element = main_element if random.random() < 0.7 else random.choice(alt_elements)
+
+        level = chapter * 5 + stage * 2
+        rank = "普通"
+        power_multiplier = 1.0
+        name = "异能失控体"
+        if stage == 10:
+            rank = "Boss"
+            power_multiplier = 1.35
+            name = "章节首领"
+        elif stage % 5 == 0:
+            rank = "精英"
+            power_multiplier = 1.18
+            name = "精英猎手"
+
+        base_power = 80 + chapter * 24 + stage * 18 + level * 2
+        power = int(base_power * power_multiplier)
+        return EnemyProfile(name=name, element=enemy_element, level=level, rank=rank, power=power)
+
     def gacha_once(self) -> None:
         if self.player.gems < 120:
             print("钻石不足，无法抽卡。")
@@ -147,7 +182,7 @@ class Game:
                 has_sr_or_higher = True
             self.player.roster.append(card)
             self.missions.pulls_done += 1
-            print(f"{i + 1:02d}. {card.rarity} {card.name}[{card.element}] 战力{card.power}")
+            print(f"{i + 1:02d}. {card.rarity} {card.name}[{card.element}] Lv.{card.level} 战力{card.power}")
 
     def upgrade_card(self) -> None:
         if not self.player.roster:
@@ -167,8 +202,8 @@ class Game:
         if self.player.coins < cost:
             print(f"金币不足，升级需要{cost}金币。")
             return
-        self.player.coins -= cost
         card.level += 1
+        self.player.coins -= cost
         print(f"{card.name} 升到 Lv.{card.level}，战力提升到 {card.power}。")
 
     def set_team(self) -> None:
@@ -185,8 +220,10 @@ class Game:
             print("编号重复或越界。")
             return
         self.player.selected_team = ids
-        names = [self.player.roster[i].name for i in ids]
-        print(f"编队成功：{' / '.join(names)}")
+        team = [self.player.roster[i] for i in ids]
+        print("编队成功：")
+        for card in team:
+            print(f"- {card.name}[{card.element}] Lv.{card.level} 战力{card.power}")
 
     def battle_stage(self) -> None:
         if self.player.energy <= 0:
@@ -194,21 +231,23 @@ class Game:
             return
         self.player.energy -= 1
 
-        enemy_element = random.choice(ELEMENTS)
-        enemy_power = 80 + self.player.chapter * 24 + self.player.stage * 18
+        enemy = self._build_enemy(self.player.chapter, self.player.stage)
         team_power = self.player.team_power()
-        element_bonus = self._team_element_bonus(enemy_element)
+        element_bonus = self._team_element_bonus(enemy.element)
 
-        print(f"敌方属性：{enemy_element} | 出战战力：{team_power} | 敌方战力：{enemy_power}")
+        print(
+            f"敌人：{enemy.name}({enemy.rank}) Lv.{enemy.level} [{enemy.element}] 战力{enemy.power}\n"
+            f"我方：队伍战力 {team_power}"
+        )
         if element_bonus > 0:
             print(f"触发属性克制/阵容加成：+{int(element_bonus * 100)}%")
 
         adjusted_power = team_power * (1 + element_bonus)
-        win_chance = min(0.92, max(0.12, 0.45 + (adjusted_power - enemy_power) / 220))
+        win_chance = min(0.92, max(0.12, 0.45 + (adjusted_power - enemy.power) / 230))
 
         if random.random() < win_chance:
-            gain_coin = 180 + self.player.stage * 30
-            gain_gem = 20 if self.player.stage % 3 == 0 else 10
+            gain_coin = 180 + self.player.stage * 30 + enemy.level * 3
+            gain_gem = 25 if enemy.rank == "Boss" else (15 if enemy.rank == "精英" else 10)
             self.player.coins += gain_coin
             self.player.gems += gain_gem
             self.missions.stages_done += 1
@@ -219,7 +258,7 @@ class Game:
                 self.player.chapter += 1
                 print(f"章节突破！进入第 {self.player.chapter} 章")
         else:
-            print("战斗失败，本次无奖励。建议调整编队属性或提升等级。")
+            print("战斗失败，本次无奖励。建议按章节主属性提前规划克制队伍。")
 
     def campus_event(self) -> None:
         if self.player.energy < 2:
@@ -263,6 +302,24 @@ class Game:
         else:
             print("继续完成任务目标吧。")
 
+    def progression_guide(self) -> None:
+        current_ch = self.player.chapter
+        now_main = self._chapter_main_element(current_ch)
+        next_main = self._chapter_main_element(current_ch + 1)
+
+        now_counter = [e for e in ELEMENTS if ELEMENT_COUNTER[e] == now_main]
+        next_counter = [e for e in ELEMENTS if ELEMENT_COUNTER[e] == next_main]
+
+        enemy_now = self._build_enemy(current_ch, min(self.player.stage + 2, 10))
+        enemy_next = self._build_enemy(current_ch + 1, 3)
+
+        print("\n=== 章节属性规划建议 ===")
+        print(f"当前第{current_ch}章主怪属性：{now_main}，建议优先培养：{', '.join(now_counter)}")
+        print(f"下一章（第{current_ch + 1}章）主怪属性：{next_main}，建议预培养：{', '.join(next_counter)}")
+        print(f"当前章节中期参考敌人：Lv.{enemy_now.level} 战力约 {enemy_now.power}")
+        print(f"下一章节前段参考敌人：Lv.{enemy_next.level} 战力约 {enemy_next.power}")
+        print(f"你当前队伍战力：{self.player.team_power()}（建议至少达到下一章参考战力的 92% 再推进）")
+
     def recover_energy(self) -> None:
         if self.player.gems < 50:
             print("钻石不足，无法恢复体力。")
@@ -273,8 +330,14 @@ class Game:
 
     def show_status(self) -> None:
         print("\n=== 玩家状态 ===")
-        print(f"章节: {self.player.chapter}-{self.player.stage} | 钻石: {self.player.gems} | 金币: {self.player.coins} | 体力: {self.player.energy}")
-        print(f"角色数: {len(self.player.roster)} | 主力队战力: {self.player.team_power()} | 每日任务: {self.missions.progress_text()}")
+        print(
+            f"章节: {self.player.chapter}-{self.player.stage} | 钻石: {self.player.gems} | "
+            f"金币: {self.player.coins} | 体力: {self.player.energy}"
+        )
+        print(
+            f"角色数: {len(self.player.roster)} | 主力队战力: {self.player.team_power()} | "
+            f"每日任务: {self.missions.progress_text()}"
+        )
 
     def show_roster(self) -> None:
         print("\n=== 角色列表 ===")
@@ -282,14 +345,14 @@ class Game:
             print(f"{i:02d}. {c.rarity} {c.name}[{c.element}] Lv.{c.level} 战力{c.power}")
 
     def run(self) -> None:
-        print("欢迎来到《校园异能扭蛋》MVP+ 文字版！")
+        print("欢迎来到《校园异能扭蛋》MVP++ 文字版！")
         while True:
             self.show_status()
             print(
-                "\n1. 单抽(120钻)   2. 十连(1080钻)   3. 推进主线(1体力)\n"
-                "4. 升级角色       5. 查看角色        6. 恢复体力(50钻+6体力)\n"
-                "7. 校园事件(2体力) 8. 编队             9. 每日任务\n"
-                "0. 退出"
+                "\n1. 单抽(120钻)      2. 十连(1080钻)     3. 推进主线(1体力)\n"
+                "4. 升级角色          5. 查看角色          6. 恢复体力(50钻+6体力)\n"
+                "7. 校园事件(2体力)   8. 编队              9. 每日任务\n"
+                "10. 章节属性规划      0. 退出"
             )
             choice = input("请选择操作：").strip()
             if choice == "1":
@@ -310,6 +373,8 @@ class Game:
                 self.set_team()
             elif choice == "9":
                 self.mission_center()
+            elif choice == "10":
+                self.progression_guide()
             elif choice == "0":
                 print("感谢游玩，欢迎下次回来抽卡！")
                 break
