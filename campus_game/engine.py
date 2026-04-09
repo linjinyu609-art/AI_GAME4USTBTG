@@ -63,6 +63,7 @@ class PlayerState:
     heroes: List[Dict] = field(default_factory=list)
     team_ids: List[str] = field(default_factory=list)
     hero_relics: Dict[str, Dict] = field(default_factory=dict)
+    active_buffs: List[Dict] = field(default_factory=list)
     daily: Dict = field(default_factory=lambda: {
         "pull": 0,
         "battle": 0,
@@ -210,16 +211,30 @@ class GameEngine:
     def _team_power_detail(self, enemy: Dict):
         team = self._get_team()
         synergy = self._team_synergy_bonus(team)
+        buff_mult = self._active_buff_multiplier()
         total = 0
         detail = []
         for h in team:
             mult = self._skill_multiplier(h, enemy)
             relic = self._relic_bonus(h)
-            value = int(h.power * mult * (1 + relic))
+            value = int(h.power * mult * (1 + relic) * buff_mult)
             total += value
             detail.append((h, mult, relic, value))
         total = int(total * (1 + synergy))
-        return total, detail, synergy
+        return total, detail, synergy, buff_mult
+
+    def _active_buff_multiplier(self) -> float:
+        if not self.state.active_buffs:
+            return 1.0
+        total = sum(b["value"] for b in self.state.active_buffs if b.get("duration", 0) > 0)
+        return 1.0 + total
+
+    def _consume_buff_duration(self):
+        if not self.state.active_buffs:
+            return
+        for buff in self.state.active_buffs:
+            buff["duration"] = max(0, buff["duration"] - 1)
+        self.state.active_buffs = [b for b in self.state.active_buffs if b["duration"] > 0]
 
     def _grant_account_exp(self, value: int):
         self.state.account_exp += value
@@ -260,6 +275,9 @@ class GameEngine:
                 ]
             )
         )
+        if self.state.active_buffs:
+            buff_text = ", ".join([f"{b['name']}(+{int(b['value']*100)}%, 剩{b['duration']}战)" for b in self.state.active_buffs])
+            print(ui.color(f"当前增益: {buff_text}", "blue", bold=True))
         d = self.state.daily
         print(
             f"每日任务: 抽卡 {ui.progress(d['pull'], 5, 8)} "
@@ -424,7 +442,7 @@ class GameEngine:
         self.state.stamina -= 1
 
         enemy = self._enemy_for_stage()
-        team_power, detail, synergy = self._team_power_detail(enemy)
+        team_power, detail, synergy, buff_mult = self._team_power_detail(enemy)
 
         print(
             ui.card_block(
@@ -440,6 +458,8 @@ class GameEngine:
             print(f"  - {h.name} {h.element}/{h.role} 基础{h.power} 技能x{m:.2f} 芯片+{int(relic*100)}% => {v}")
         if synergy > 0:
             print(f"队伍协同加成 +{int(synergy*100)}%")
+        if buff_mult > 1.0:
+            print(f"远征增益加成 +{int((buff_mult-1)*100)}%")
 
         win_rate = max(0.08, min(0.95, 0.48 + (team_power - enemy['power']) / 360))
         print(f"总战力:{team_power}, 预计胜率:{ui.color(str(int(win_rate * 100)) + '%', 'green' if win_rate >= 0.5 else 'red', bold=True)}")
@@ -457,9 +477,11 @@ class GameEngine:
             self._grant_account_exp(28)
             self._advance_stage()
             self._quest_progress(1)
+            self._consume_buff_duration()
             print(f"战斗胜利 +{coin}金币 +{gem}钻石 +{shard}芯片碎片")
         else:
             reason = self._battle_failure_advice(enemy)
+            self._consume_buff_duration()
             print("战斗失败。建议：")
             for line in reason:
                 print(f"  * {line}")
@@ -487,9 +509,11 @@ class GameEngine:
         total_score = 0
         for floor in range(1, 4):
             enemy = self._trial_enemy(floor)
-            team_power, detail, synergy = self._team_power_detail(enemy)
+            team_power, detail, synergy, buff_mult = self._team_power_detail(enemy)
             floor_rate = max(0.06, min(0.92, 0.45 + (team_power - enemy["power"]) / 390))
             print(f"第{floor}层: {enemy['name']} {enemy['rank']} Lv.{enemy['level']} 战力{enemy['power']} 胜率{int(floor_rate*100)}%")
+            if buff_mult > 1.0:
+                print(f"  增益生效 +{int((buff_mult-1)*100)}%")
             if random.random() < floor_rate:
                 gained = int(enemy["power"] * 0.08)
                 total_score += gained
@@ -497,6 +521,7 @@ class GameEngine:
             else:
                 print("  失败，本次试炼提前结束")
                 break
+            self._consume_buff_duration()
         coin = 300 + total_score // 2
         gem = 20 + total_score // 90
         shard = 10 + total_score // 140
@@ -614,6 +639,55 @@ class GameEngine:
         print(f"当前章中段参考敌战力:{sim_curr} | 下一章前段参考敌战力:{sim_next}")
         print(f"你当前队伍战力(含芯片):{int(team_power)}，建议达到下一章参考值的 90% 以上再冲关。")
 
+    def mystery_expedition(self):
+        if self.state.stamina < 3:
+            print("体力不足（远征需3体力）")
+            return
+        self.state.stamina -= 3
+        print(ui.section("=== 校园秘境远征（5节点）==="))
+        buffs_found = []
+        coin_gain = 0
+        shard_gain = 0
+        for step in range(1, 6):
+            node = random.choice(["战斗", "补给", "奇遇"])
+            print(f"节点{step}: {node}")
+            if node == "战斗":
+                enemy = self._trial_enemy(step + self.state.chapter)
+                team_power, _, _, _ = self._team_power_detail(enemy)
+                rate = max(0.1, min(0.92, 0.45 + (team_power - enemy['power']) / 420))
+                print(f"  遭遇 {enemy['name']} ({enemy['rank']})，胜率{int(rate*100)}%")
+                if random.random() < rate:
+                    c = 120 + step * 40
+                    s = 4 + step
+                    coin_gain += c
+                    shard_gain += s
+                    print(f"  战斗胜利 +{c}金币 +{s}碎片")
+                else:
+                    loss = 80 + step * 20
+                    self.state.coins = max(0, self.state.coins - loss)
+                    print(f"  战斗失利，损失 {loss} 金币")
+            elif node == "补给":
+                self.state.stamina = min(45, self.state.stamina + 2)
+                c = 180 + step * 30
+                coin_gain += c
+                print(f"  获得补给: +2体力 +{c}金币")
+            else:
+                buff = random.choice(
+                    [
+                        {"name": "斗志高昂", "value": 0.08, "duration": 3},
+                        {"name": "元素共鸣", "value": 0.1, "duration": 2},
+                        {"name": "战术冷静", "value": 0.06, "duration": 4},
+                    ]
+                )
+                buffs_found.append(buff)
+                print(f"  触发奇遇，获得增益 {buff['name']} +{int(buff['value']*100)}% 持续{buff['duration']}战")
+        self.state.coins += coin_gain
+        self.state.relic_shards += shard_gain
+        self.state.active_buffs.extend(buffs_found)
+        self.state.daily["event"] += 1
+        self._grant_account_exp(24)
+        print(ui.card_block("远征结算", f"获得增益{len(buffs_found)}个", [f"金币 +{coin_gain}", f"碎片 +{shard_gain}"], width=42))
+
     def _simulate_enemy_power(self, chapter: int, stage: int) -> int:
         level = chapter * 6 + stage * 3
         base = 95 + chapter * 16 + stage * 9 + level * 3
@@ -646,7 +720,8 @@ class GameEngine:
                         "1 单抽      2 十连      3 推图      4 校园事件",
                         "5 角色仓库  6 编队      7 角色升级  8 每日任务",
                         "9 章节任务板 10 章节规划 11 体力恢复 12 保存",
-                        "13 重置每日(测试) 14 芯片工坊 15 深渊试炼 0 退出",
+                        "13 重置每日(测试) 14 芯片工坊 15 深渊试炼 16 秘境远征",
+                        "0 退出",
                     ]
                 )
             )
@@ -681,6 +756,8 @@ class GameEngine:
                 self.relic_workshop()
             elif choice == "15":
                 self.abyss_trial()
+            elif choice == "16":
+                self.mystery_expedition()
             elif choice == "0":
                 self.save()
                 print("感谢游玩，已自动保存。")
