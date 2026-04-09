@@ -37,3 +37,10 @@ python3 main.py
 - `campus_game/engine.py`：游戏核心系统（玩法逻辑）
 - `campus_game/content_database.py`：大规模内容库（角色/敌人/事件/章节/技能）
 - `PRODUCT_ROADMAP.md`：后续版本路线图
+
+## 终端画面优化（本轮新增）
+
+- ANSI 颜色高亮（稀有度/敌人品阶/胜率）
+- 统一菜单块（减少信息噪音）
+- 卡片式战斗信息面板（敌人信息和试炼结算）
+- 任务与账号经验进度条
