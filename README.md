@@ -48,3 +48,10 @@ python3 main.py
 - `campus_game/ui.py`：终端视觉渲染层
 - `campus_game/content_database.py`：大规模内容库（角色/敌人/事件/章节/技能）
 - `PRODUCT_ROADMAP.md`：后续版本路线图
+
+## v0.2.1 数值与留存优化（本轮新增）
+
+- 首章前3关怪物强度下调（降低首日挫败）
+- 新手保护机制：前8场战斗失败可触发一次强增益（持续2战）
+- 增加轻量埋点日志 `telemetry_log.jsonl`
+  - 记录推图胜负、试炼进出与结算、远征节点与结算

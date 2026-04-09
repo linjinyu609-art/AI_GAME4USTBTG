@@ -14,6 +14,7 @@ from campus_game.content_database import (
 from . import ui
 
 SAVE_PATH = Path("save_data.json")
+TELEMETRY_PATH = Path("telemetry_log.jsonl")
 
 RARITY_RATE = {"SSR": 0.05, "SR": 0.25, "R": 0.70}
 RARITY_BASE = {"SSR": 52, "SR": 34, "R": 22}
@@ -60,6 +61,8 @@ class PlayerState:
     pity_count: int = 0
     trial_tickets: int = 3
     relic_shards: int = 0
+    battle_count: int = 0
+    newbie_retry_tokens: int = 1
     heroes: List[Dict] = field(default_factory=list)
     team_ids: List[str] = field(default_factory=list)
     hero_relics: Dict[str, Dict] = field(default_factory=dict)
@@ -111,6 +114,7 @@ class GameEngine:
     def save(self):
         SAVE_PATH.write_text(json.dumps(self._serialize(), ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"已保存进度到 {SAVE_PATH}")
+        self._log_event("save", {"chapter": self.state.chapter, "stage": self.state.stage})
 
     def load(self):
         if not SAVE_PATH.exists():
@@ -120,6 +124,12 @@ class GameEngine:
         self._hydrate(payload)
         self._ensure_quests()
         print("存档加载成功。")
+        self._log_event("load", {"chapter": self.state.chapter, "stage": self.state.stage})
+
+    def _log_event(self, name: str, payload: Dict):
+        row = {"event": name, "chapter": self.state.chapter, "stage": self.state.stage, **payload}
+        with TELEMETRY_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     def _ensure_quests(self):
         for q in CHAPTER_BLUEPRINTS:
@@ -184,6 +194,9 @@ class GameEngine:
 
         level = c * 6 + s * 3
         base = template["base_power"] + level * 3 + c * 16 + s * 9
+        # 新手期前3关降难度，缓解首日挫败
+        if c == 1 and s <= 3:
+            base = int(base * 0.82)
         return {
             "name": template["name"],
             "element": template["element"],
@@ -440,6 +453,7 @@ class GameEngine:
             print("体力不足")
             return
         self.state.stamina -= 1
+        self.state.battle_count += 1
 
         enemy = self._enemy_for_stage()
         team_power, detail, synergy, buff_mult = self._team_power_detail(enemy)
@@ -479,12 +493,21 @@ class GameEngine:
             self._quest_progress(1)
             self._consume_buff_duration()
             print(f"战斗胜利 +{coin}金币 +{gem}钻石 +{shard}芯片碎片")
+            self._log_event("battle_win", {"enemy_rank": enemy["rank"], "enemy_power": enemy["power"], "win_rate": round(win_rate, 3)})
         else:
             reason = self._battle_failure_advice(enemy)
             self._consume_buff_duration()
             print("战斗失败。建议：")
             for line in reason:
                 print(f"  * {line}")
+            self._log_event("battle_fail", {"enemy_rank": enemy["rank"], "enemy_power": enemy["power"], "win_rate": round(win_rate, 3)})
+            # 新手保护：前8战且首章失败后自动给一次可持续2战的强增益
+            if self.state.chapter == 1 and self.state.battle_count <= 8 and self.state.newbie_retry_tokens > 0:
+                self.state.newbie_retry_tokens -= 1
+                rescue_buff = {"name": "新手战术支援", "value": 0.18, "duration": 2}
+                self.state.active_buffs.append(rescue_buff)
+                print(ui.color("触发新手保护：获得[新手战术支援]+18%（持续2战）", "green", bold=True))
+                self._log_event("newbie_rescue_buff", {"value": 0.18, "duration": 2})
 
     def _battle_failure_advice(self, enemy: Dict):
         advice = []
@@ -505,6 +528,7 @@ class GameEngine:
             print("试炼票不足")
             return
         self.state.trial_tickets -= 1
+        self._log_event("trial_enter", {"tickets_left": self.state.trial_tickets})
         print(ui.section("=== 深渊试炼开始（3层）==="))
         total_score = 0
         for floor in range(1, 4):
@@ -530,6 +554,7 @@ class GameEngine:
         self.state.relic_shards += shard
         self.state.daily["trial"] += 1
         self._grant_account_exp(20)
+        self._log_event("trial_result", {"score": total_score, "coin": coin, "gem": gem, "shard": shard})
         print(
             ui.card_block(
                 name="试炼结算",
@@ -644,6 +669,7 @@ class GameEngine:
             print("体力不足（远征需3体力）")
             return
         self.state.stamina -= 3
+        self._log_event("expedition_enter", {"stamina_after_cost": self.state.stamina})
         print(ui.section("=== 校园秘境远征（5节点）==="))
         buffs_found = []
         coin_gain = 0
@@ -651,6 +677,7 @@ class GameEngine:
         for step in range(1, 6):
             node = random.choice(["战斗", "补给", "奇遇"])
             print(f"节点{step}: {node}")
+            self._log_event("expedition_node", {"step": step, "node": node})
             if node == "战斗":
                 enemy = self._trial_enemy(step + self.state.chapter)
                 team_power, _, _, _ = self._team_power_detail(enemy)
@@ -686,6 +713,7 @@ class GameEngine:
         self.state.active_buffs.extend(buffs_found)
         self.state.daily["event"] += 1
         self._grant_account_exp(24)
+        self._log_event("expedition_result", {"coin": coin_gain, "shard": shard_gain, "buff_count": len(buffs_found)})
         print(ui.card_block("远征结算", f"获得增益{len(buffs_found)}个", [f"金币 +{coin_gain}", f"碎片 +{shard_gain}"], width=42))
 
     def _simulate_enemy_power(self, chapter: int, stage: int) -> int:
